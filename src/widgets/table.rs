@@ -14,7 +14,7 @@ pub fn make_query_table(data: &[Query], width: u16) -> Table<'_> {
       let time = Cell::from(time_ago(query.time.as_str()).unwrap_or("unknown".to_string()))
         .style(Style::default().fg(Color::Gray));
 
-      let question = Cell::from(make_request_cell(&query.question).unwrap())
+      let question = Cell::from(make_request_cell(&query.question))
         .style(Style::default().add_modifier(Modifier::BOLD));
 
       let client = Cell::from(query.client.as_str()).style(Style::default().fg(Color::Blue));
@@ -95,8 +95,8 @@ fn time_ago(timestamp: &str) -> Result<String, anyhow::Error> {
 }
 
 // Return cell showing info about the request made in a given query
-fn make_request_cell(q: &Question) -> Result<String, anyhow::Error> {
-  Ok(format!("[{}] {} - {}", q.class, q.question_type, q.name))
+fn make_request_cell(q: &Question) -> String {
+  format!("[{}] {} - {}", q.class, q.question_type, q.name)
 }
 
 // Return a cell showing the time taken for a query, and a color based on time

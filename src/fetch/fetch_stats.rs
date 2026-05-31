@@ -12,7 +12,8 @@ pub struct DomainData {
   pub count: i32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
 pub struct StatsResponse {
   pub num_dns_queries: u64,
   pub num_blocked_filtering: u64,

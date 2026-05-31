@@ -41,10 +41,33 @@ function print_info {
 print_heading "Checking system type"
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
   print_info "System type: Linux"
-  bin_target="adguardian-linux"
+  case "$(uname -m)" in
+    x86_64|amd64)
+      bin_target="adguardian-linux"
+      ;;
+    aarch64|arm64)
+      bin_target="adguardian-linux-arm64"
+      ;;
+    armv7l|armv7*)
+      bin_target="adguardian-linux-armv7"
+      ;;
+    *)
+      exit_script "Unsupported Linux architecture: $(uname -m)"
+      ;;
+  esac
 elif [[ "$OSTYPE" == "darwin"* ]]; then
   print_info "System type: Apple OS X"
-  bin_target="adguardian-macos"
+  case "$(uname -m)" in
+    arm64)
+      bin_target="adguardian-macos"
+      ;;
+    x86_64)
+      bin_target="adguardian-macos-x86_64"
+      ;;
+    *)
+      exit_script "Unsupported macOS architecture: $(uname -m)"
+      ;;
+  esac
 elif [[ "$OSTYPE" == "cygwin" ]]; then
   print_info "System type: Windows/Cygwin"
   bin_target="adguardian-windows.exe"
@@ -52,32 +75,26 @@ else
     exit_script "Unsupported System"
 fi
 
-# Make the download link to latest binary for users system type
-download_link="$upstream_repo/releases/$adguardian_version/download/$bin_target"
-
 # Check if the binary already exists
 print_heading "Preparing to download"
+download_link="$upstream_repo/releases/$adguardian_version/download/$bin_target"
 if [ -f "$download_location" ]; then
     print_info "File already exists, skipping download."
+elif hash "curl" 2> /dev/null; then
+    print_info "Downloading to $download_location (with curl) from $download_link"
+    curl --fail --location --output "$download_location" "$download_link" \
+      || { rm -f "$download_location"; exit_script "Unable to download a binary for your system"; }
+elif hash "wget" 2> /dev/null; then
+    print_info "Downloading to $download_location (with wget) from $download_link"
+    wget --no-verbose --show-progress --progress=dot:mega -q -S -O "$download_location" "$download_link" \
+      || { rm -f "$download_location"; exit_script "Unable to download a binary for your system"; }
 else
-    # Download with either curl or wget, depending on what is installed
-    if hash "curl" 2> /dev/null; then
-      print_info "Downloading to $download_location (with curl)"
-      curl -L -o $download_location $download_link
-    elif hash "wget" 2> /dev/null; then
-      print_info "Downloading to $download_location (with wget)"
-      wget \
-        --no-verbose --show-progress \
-        --progress=dot:mega -q -S \
-        -O $download_location $download_link
-    else
-      exit_script "Neither curl nor wget were found on your system"
-    fi
+    exit_script "Neither curl nor wget were found on your system"
 fi
 
 # Make the binary executable, then run the application
 print_heading "Preparing to run"
 print_info "Updating permissions for $download_location"
-chmod +x $download_location
+chmod +x "$download_location"
 print_info "Starting AdGuardian....\n\n"
-$download_location
+"$download_location"

@@ -28,7 +28,8 @@ use serde::Deserialize;
 /// * `protection_enabled` - Whether or not protection is currently enabled.
 /// * `dhcp_available` - Whether or not DHCP is available.
 /// * `running` - Whether or not the AdGuard Home instance is currently running.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
 pub struct StatusResponse {
   pub version: String,
   pub dns_port: u16,

@@ -10,7 +10,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use ui::draw_ui;
 
 use fetch::{
-  fetch_filters::fetch_adguard_filter_list,
+  fetch_filters::{fetch_adguard_filter_list, AdGuardFilteringStatus},
   fetch_query_log::{fetch_adguard_query_log, Query},
   fetch_stats::{fetch_adguard_stats, StatsResponse},
   fetch_status::{fetch_adguard_status, StatusResponse},
@@ -33,8 +33,14 @@ async fn fetch_all(
 }
 
 async fn run() -> anyhow::Result<()> {
-  // Create a reqwest client
-  let client = Client::new();
+  // Per-request timeout (seconds), clamped to at least 1, so no request can hang
+  let timeout_secs: u64 = env::var("ADGUARD_TIMEOUT")
+    .unwrap_or_else(|_| "5".into())
+    .parse::<u64>()?
+    .max(1);
+  let client = Client::builder()
+    .timeout(Duration::from_secs(timeout_secs))
+    .build()?;
 
   // AdGuard instance details, from env vars (verified in welcome.rs)
   let ip = env::var("ADGUARD_IP")?;
@@ -44,8 +50,18 @@ async fn run() -> anyhow::Result<()> {
   let username = env::var("ADGUARD_USERNAME")?;
   let password = env::var("ADGUARD_PASSWORD")?;
 
-  // Fetch data that doesn't require updates
-  let filters = fetch_adguard_filter_list(&client, &hostname, &username, &password).await?;
+  // Fetch the filter list, use empty list on failures is fine
+  let filters = welcome::with_retries(
+    3,
+    Duration::from_secs(5),
+    "Fetching AdGuard filters",
+    || fetch_adguard_filter_list(&client, &hostname, &username, &password),
+  )
+  .await
+  .unwrap_or_else(|e| {
+    eprintln!("Could not fetch filter list, starting without it: {}", e);
+    AdGuardFilteringStatus { filters: None }
+  });
 
   // Open channels for data fetching where updates are required
   let (queries_tx, queries_rx) = tokio::sync::mpsc::channel(1);
@@ -64,10 +80,11 @@ async fn run() -> anyhow::Result<()> {
     shutdown_tx,
   ));
 
-  // Get update interval (in seconds)
+  // Get update interval (in seconds), clamped to at least 1 (interval() panics on zero)
   let interval_secs: u64 = env::var("ADGUARD_UPDATE_INTERVAL")
     .unwrap_or_else(|_| "2".into())
-    .parse()?;
+    .parse::<u64>()?
+    .max(1);
   let mut interval = interval(Duration::from_secs(interval_secs));
   interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -106,7 +123,7 @@ async fn run() -> anyhow::Result<()> {
 }
 
 fn main() {
-  let rt = tokio::runtime::Runtime::new().unwrap();
+  let rt = tokio::runtime::Runtime::new().expect("failed to start async runtime");
   rt.block_on(async {
     welcome::welcome().await.unwrap_or_else(|e| {
       eprintln!("Failed to initialize: {}", e);

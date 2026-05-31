@@ -1,9 +1,15 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use colored::*;
+use crossterm::{
+  event::{self, Event, KeyCode, KeyModifiers},
+  terminal::{disable_raw_mode, enable_raw_mode},
+};
 use reqwest::{Client, Error};
 use std::{
+  cmp::Ordering,
   env,
-  io::{self, Write},
+  fmt::Display,
+  io::{self, IsTerminal, Write},
   time::Duration,
 };
 
@@ -43,7 +49,7 @@ fn print_ascii_art() {
 }
 
 /// Print error message, along with (optional) stack trace, then exit
-fn print_error(message: &str, sub_message: &str, error: Option<&Error>) {
+fn print_error(message: &str, sub_message: &str, error: Option<&Error>) -> ! {
   eprintln!(
     "{}{}{}",
     message.red(),
@@ -118,14 +124,54 @@ fn check_version(version: Option<&str>) {
   }
 }
 
-/// With the users specified AdGuard details, verify the connection (exit on fail)
+/// Run an async operation, retrying on error up to `attempts` times, `delay` apart.
+/// Each failure is reported; the last error is returned once attempts are exhausted.
+pub async fn with_retries<T, E, F, Fut>(
+  attempts: u32,
+  delay: Duration,
+  label: &str,
+  mut operation: F,
+) -> Result<T, E>
+where
+  F: FnMut() -> Fut,
+  Fut: std::future::Future<Output = Result<T, E>>,
+  E: Display,
+{
+  let mut attempt = 1;
+  loop {
+    match operation().await {
+      Ok(value) => return Ok(value),
+      Err(e) if attempt < attempts => {
+        println!(
+          "{}",
+          format!(
+            "{} failed (attempt {}/{}): {}\nRetrying in {}s...",
+            label,
+            attempt,
+            attempts,
+            e,
+            delay.as_secs()
+          )
+          .yellow()
+        );
+        tokio::time::sleep(delay).await;
+        attempt += 1;
+      }
+      Err(e) => return Err(e),
+    }
+  }
+}
+
+/// With the users specified AdGuard details, verify the connection.
+/// Returns `Err` on a failed connection (so the caller can retry); exits on
+/// rejected auth or an unsupported version, which retrying wouldn't fix.
 async fn verify_connection(
   client: &Client,
-  ip: String,
-  port: String,
-  protocol: String,
-  username: String,
-  password: String,
+  ip: &str,
+  port: &str,
+  protocol: &str,
+  username: &str,
+  password: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
   println!(
     "{}",
@@ -159,23 +205,13 @@ async fn verify_connection(
       Ok(())
     }
     // Connection failed to authenticate. Print error and exit
-    Ok(_) => {
-      print_error(
-        &format!("Authentication with AdGuard at {}:{} failed", ip, port),
-        "Please check your environmental variables and try again.",
-        None,
-      );
-      Ok(())
-    }
-    // Connection failed to establish. Print error and exit
-    Err(e) => {
-      print_error(
-        &format!("Failed to connect to AdGuard at: {}:{}", ip, port),
-        "Please check your environmental variables and try again.",
-        Some(&e),
-      );
-      Ok(())
-    }
+    Ok(_) => print_error(
+      &format!("Authentication with AdGuard at {}:{} failed", ip, port),
+      "Check the credentials you passed as environmental variables and try again.",
+      None,
+    ),
+    // Connection failed to establish - return so the caller can retry
+    Err(e) => Err(e.into()),
   }
 }
 
@@ -200,6 +236,7 @@ async fn get_latest_version(crate_name: &str) -> Result<String, Box<dyn std::err
       reqwest::header::USER_AGENT,
       "version_check (adguardian.as93.net)",
     )
+    .timeout(Duration::from_secs(2))
     .send()
     .await?;
 
@@ -220,22 +257,22 @@ async fn check_for_updates() {
   let crate_version = env!("CARGO_PKG_VERSION");
   println!("{}", "\nChecking for updates...".blue());
   // Parse the current version, and fetch and parse the latest version
-  let current_version =
-    Version::parse(crate_version).unwrap_or_else(|_| Version::parse("0.0.0").unwrap());
+  let zero = Version::new(0, 0, 0);
+  let current_version = Version::parse(crate_version).unwrap_or_else(|_| zero.clone());
   let latest_version = Version::parse(
     &get_latest_version(crate_name)
       .await
       .unwrap_or_else(|_| "0.0.0".to_string()),
   )
-  .unwrap_or_else(|_| Version::parse("0.0.0").unwrap());
+  .unwrap_or_else(|_| zero.clone());
 
   // Compare the current and latest versions, and print the appropriate message
-  if current_version == Version::parse("0.0.0").unwrap()
-    || latest_version == Version::parse("0.0.0").unwrap()
-  {
+  if current_version == zero || latest_version == zero {
     println!("{}", "Unable to check for updates".yellow());
-  } else if current_version < latest_version {
-    println!(
+    return;
+  }
+  match current_version.cmp(&latest_version) {
+    Ordering::Less => println!(
       "{}",
       format!(
         "A new version of AdGuardian is available.\nUpdate from {} to {} for the best experience",
@@ -243,27 +280,124 @@ async fn check_for_updates() {
         latest_version.to_string().bold()
       )
       .yellow()
-    );
-  } else if current_version == latest_version {
-    println!(
+    ),
+    Ordering::Equal => println!(
       "{}",
       format!(
         "AdGuardian is up-to-date, running version {}",
         current_version.to_string().bold()
       )
       .green()
-    );
-  } else if current_version > latest_version {
-    println!(
+    ),
+    Ordering::Greater => println!(
       "{}",
       format!(
         "Running a pre-released edition of AdGuardian, version {}",
         current_version.to_string().bold()
       )
       .green()
-    );
+    ),
+  }
+}
+
+/// The value to pre-fill for a field's interactive prompt, where a sensible one exists
+fn default_for(key: &str) -> Option<&'static str> {
+  match key {
+    "ADGUARD_IP" => Some("127.0.0.1"),
+    "ADGUARD_PORT" => Some("3000"),
+    _ => None,
+  }
+}
+
+/// Read a line from the terminal in raw mode, echoing nothing. Ctrl-C cancels.
+fn read_masked() -> io::Result<String> {
+  enable_raw_mode()?;
+  let result = masked_loop();
+  let _ = disable_raw_mode();
+  if result.is_ok() {
+    println!();
+  }
+  result
+}
+
+fn masked_loop() -> io::Result<String> {
+  let mut value = String::new();
+  loop {
+    if let Event::Key(key) = event::read()? {
+      let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+      match key.code {
+        KeyCode::Enter => return Ok(value),
+        KeyCode::Char('c') if ctrl => return Err(io::ErrorKind::Interrupted.into()),
+        KeyCode::Char(c) if !ctrl => value.push(c),
+        KeyCode::Backspace => {
+          value.pop();
+        }
+        _ => {}
+      }
+    }
+  }
+}
+
+/// Print the prompt and read a value, masking secret fields on an interactive terminal
+fn read_field(prompt: &ColoredString, secret: bool) -> io::Result<String> {
+  print!("{}", prompt);
+  io::stdout().flush()?;
+  if secret && io::stdin().is_terminal() {
+    read_masked()
   } else {
-    println!("{}", "Unable to check for updates".yellow());
+    let mut value = String::new();
+    io::stdin().read_line(&mut value)?;
+    Ok(value)
+  }
+}
+
+/// Read a field off the async runtime threads
+async fn read_input(prompt: ColoredString, secret: bool) -> io::Result<String> {
+  tokio::task::spawn_blocking(move || read_field(&prompt, secret))
+    .await
+    .expect("input task panicked")
+}
+
+/// Print the cancellation notice and exit cleanly
+fn exit_interrupted() -> ! {
+  println!(
+    "{}",
+    "\n\nAdGuardian setup interrupted by user, exiting...".yellow()
+  );
+  std::process::exit(0);
+}
+
+/// Prompt for a single field, re-prompting until the input is valid.
+/// Masks passwords, applies the field's default on empty input, validates the
+/// port is numeric, and exits cleanly if the user interrupts with Ctrl-C.
+async fn prompt_for(key: &str) -> Result<String, Box<dyn std::error::Error>> {
+  let default = default_for(key);
+  let secret = key.contains("PASSWORD");
+  loop {
+    let hint = default.map(|d| format!(" [{}]", d)).unwrap_or_default();
+    let prompt = format!("› Enter a value for {}{}: ", key, hint)
+      .blue()
+      .bold();
+
+    let input = tokio::select! {
+      res = read_input(prompt, secret) => match res {
+        Ok(value) => value,
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => exit_interrupted(),
+        Err(e) => return Err(e.into()),
+      },
+      _ = tokio::signal::ctrl_c() => exit_interrupted(),
+    };
+
+    let value = match input.trim() {
+      "" => default.unwrap_or_default(),
+      trimmed => trimmed,
+    };
+
+    if key == "ADGUARD_PORT" && value.parse::<u16>().is_err() {
+      println!("{}", "Port must be a number, and a valid port".yellow());
+      continue;
+    }
+    return Ok(value.to_string());
   }
 }
 
@@ -305,7 +439,7 @@ pub async fn welcome() -> Result<(), Box<dyn std::error::Error>> {
   while let Some(arg) = args.next() {
     for &(flag, var) in &flags {
       if arg == flag {
-        if let Some(value) = args.peek() {
+        if let Some(value) = args.peek().filter(|v| !v.starts_with("--")) {
           env::set_var(var, value);
           args.next();
         }
@@ -325,12 +459,7 @@ pub async fn welcome() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         format!("The {} environmental variable is not yet set", key.bold()).yellow()
       );
-      print!("{}", format!("› Enter a value for {}: ", key).blue().bold());
-      io::stdout().flush()?;
-
-      let mut value = String::new();
-      io::stdin().read_line(&mut value)?;
-      env::set_var(key, value.trim());
+      env::set_var(key, prompt_for(key).await?);
     }
   }
 
@@ -341,8 +470,22 @@ pub async fn welcome() -> Result<(), Box<dyn std::error::Error>> {
   let username = get_env("ADGUARD_USERNAME")?;
   let password = get_env("ADGUARD_PASSWORD")?;
 
-  // Verify that we can connect, authenticate, and that version is supported (exit on failure)
-  verify_connection(&client, ip, port, protocol, username, password).await?;
+  // Verify we can connect, authenticate, and that the version is supported
+  let connected = with_retries(3, Duration::from_secs(5), "AdGuard connection", || {
+    verify_connection(&client, &ip, &port, &protocol, &username, &password)
+  })
+  .await;
+
+  if connected.is_err() {
+    print_error(
+      &format!(
+        "Could not reach AdGuard at {}:{} after 3 attempts",
+        ip, port
+      ),
+      "Please check that AdGuard Home is running and your settings are correct.",
+      None,
+    );
+  }
 
   Ok(())
 }

@@ -28,6 +28,12 @@ pub async fn fetch_adguard_filter_list(
   headers.insert("Authorization", auth_header_value.parse()?);
 
   let res: Response = client.get(&url).headers(headers).send().await?;
+  if !res.status().is_success() {
+    return Err(anyhow::anyhow!(
+      "Request failed with status code {}",
+      res.status()
+    ));
+  }
   let status: AdGuardFilteringStatus = res.json().await?;
 
   Ok(status)

@@ -2,12 +2,14 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH};
 use serde::Deserialize;
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 pub struct QueryResponse {
   pub data: Vec<Query>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 pub struct Query {
   pub cached: bool,
   pub client: String,
@@ -19,7 +21,8 @@ pub struct Query {
   pub time: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 pub struct Question {
   pub class: String,
   pub name: String,
@@ -51,4 +54,25 @@ pub async fn fetch_adguard_query_log(
 
   let data = response.json().await?;
   Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::fetch::fetch_stats::StatsResponse;
+  use crate::fetch::fetch_status::StatusResponse;
+
+  // Missing or partial fields get decoded to defaults, instead of erroring
+  #[test]
+  fn empty_and_partial_json_decode_to_defaults() {
+    serde_json::from_str::<QueryResponse>("{}").unwrap();
+    serde_json::from_str::<StatsResponse>("{}").unwrap();
+    serde_json::from_str::<StatusResponse>("{}").unwrap();
+    serde_json::from_str::<StatsResponse>(r#"{"num_dns_queries":5}"#).unwrap();
+
+    // A blocked query has no `upstream`, default to empty
+    let q = r#"{"cached":false,"client":"1.2.3.4","elapsedMs":"0.1",
+      "question":{"class":"IN","name":"x.com","type":"A"},"reason":"x","time":"t"}"#;
+    assert_eq!(serde_json::from_str::<Query>(q).unwrap().upstream, "");
+  }
 }
