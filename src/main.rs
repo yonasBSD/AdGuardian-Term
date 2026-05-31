@@ -33,7 +33,14 @@ async fn fetch_all(
 }
 
 async fn run() -> anyhow::Result<()> {
-  let client = Client::builder().timeout(Duration::from_secs(5)).build()?;
+  // Per-request timeout (seconds), clamped to at least 1, so no request can hang
+  let timeout_secs: u64 = env::var("ADGUARD_TIMEOUT")
+    .unwrap_or_else(|_| "5".into())
+    .parse::<u64>()?
+    .max(1);
+  let client = Client::builder()
+    .timeout(Duration::from_secs(timeout_secs))
+    .build()?;
 
   // AdGuard instance details, from env vars (verified in welcome.rs)
   let ip = env::var("ADGUARD_IP")?;

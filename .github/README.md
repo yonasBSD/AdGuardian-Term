@@ -158,6 +158,8 @@ There's also some additional optional environment variables that you may set:
 
 - `ADGUARD_PROTOCOL` - The protocol to use when connecting to AdGuard (defaults to `http`)
 - `ADGUARD_UPDATE_INTERVAL` - The rate at which to refresh the UI in seconds (defaults to `2`)
+- `ADGUARD_TIMEOUT` - The per-request timeout when contacting AdGuard, in seconds (defaults to `5`)
+- `ADGUARD_QUERYLOG_LIMIT` - The number of query log entries to fetch per update (defaults to `100`)
 
 <details>
 <summary>Examples</summary>
