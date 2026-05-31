@@ -1,0 +1,2 @@
+createSrcSidebar('[["adguardian",["",[["fetch",[],["fetch_filters.rs","fetch_query_log.rs","fetch_stats.rs","fetch_status.rs","mod.rs"]],["widgets",[],["chart.rs","filters.rs","gauge.rs","list.rs","mod.rs","status.rs","table.rs"]]],["main.rs","ui.rs","welcome.rs"]]]]');
+//{"start":19,"fragment_lengths":[247]}
