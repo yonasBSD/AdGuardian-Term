@@ -23,7 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      rust: ${{ steps.filter.outputs.rust }}
       docker: ${{ steps.filter.outputs.docker }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+      deps: ${{ steps.filter.outputs.deps }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -35,14 +38,28 @@ jobs:
         uses: dorny/paths-filter@v4
         with:
           filters: |
+            rust:
+              - 'src/**'
+              - 'build.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
             docker:
               - 'Dockerfile*'
+              - 'src/**'
+              - 'build.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            workflows:
+              - '.github/workflows/**'
+            deps:
               - 'Cargo.toml'
               - 'Cargo.lock'
 
   # Run format check, to ensure code nice and pretty
   fmt:
     name: 🎨 Format
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -62,6 +79,8 @@ jobs:
   # Run clippy, to ensure no rust warnings
   clippy:
     name: 📎 Clippy
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -84,6 +103,8 @@ jobs:
   # Execute the tests
   test:
     name: 🧪 Test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -104,6 +125,8 @@ jobs:
   # Do build check, ensure everything builds
   build:
     name: 🔨 Build
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -124,6 +147,8 @@ jobs:
   # Check the docs build with no warnings or broken intra-doc links
   docs:
     name: 📚 Docs
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -178,20 +203,32 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build image (no push)
+      - name: Build image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
-          push: false
-          load: false
+          load: true
+          tags: adguardian:ci
           cache-from: type=gha,scope=ci-docker
           cache-to: type=gha,mode=max,scope=ci-docker
+
+      - name: Smoke test (image starts)
+        env:
+          IMAGE: adguardian:ci
+        run: |
+          set -euo pipefail
+          output=$(timeout 30 docker run --rm "$IMAGE" </dev/null 2>&1 || true)
+          echo "$output"
+          echo "$output" | grep -q "AdGuardian Terminal Edition" \
+            || { echo "::error::Image built but did not start as expected"; exit 1; }
 
   # Review the workflow files are valid and free of security issues
   workflow-lint:
     name: ⚙️ Workflow lint
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -234,7 +271,8 @@ jobs:
   # Dependency changes have no known vulnerabilities
   dependency-review:
     name: ⛓️‍💥 Dependency review
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.deps == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
