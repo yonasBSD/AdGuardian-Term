@@ -171,7 +171,7 @@ async fn verify_connection(
     Err(e) => {
       print_error(
         &format!("Failed to connect to AdGuard at: {}:{}", ip, port),
-        "Please check your environmental variables and try again.",
+        "Please check your environmental variables and try again.\n",
         Some(&e),
       );
       Ok(())
@@ -267,6 +267,67 @@ async fn check_for_updates() {
   }
 }
 
+/// The value to pre-fill for a field's interactive prompt, where a sensible one exists
+fn default_for(key: &str) -> Option<&'static str> {
+  match key {
+    "ADGUARD_IP" => Some("127.0.0.1"),
+    "ADGUARD_PORT" => Some("3000"),
+    _ => None,
+  }
+}
+
+/// Read a line from stdin (masked, for password fields), off the async runtime threads
+async fn read_line(prompt: ColoredString, secret: bool) -> io::Result<String> {
+  tokio::task::spawn_blocking(move || {
+    if secret {
+      rpassword::prompt_password(prompt)
+    } else {
+      print!("{}", prompt);
+      io::stdout().flush()?;
+      let mut value = String::new();
+      io::stdin().read_line(&mut value)?;
+      Ok(value)
+    }
+  })
+  .await
+  .expect("input task panicked")
+}
+
+/// Prompt for a single field, re-prompting until the input is valid.
+/// Masks passwords, applies the field's default on empty input, validates the
+/// port is numeric, and exits cleanly if the user interrupts with Ctrl-C.
+async fn prompt_for(key: &str) -> Result<String, Box<dyn std::error::Error>> {
+  let default = default_for(key);
+  loop {
+    let hint = default.map(|d| format!(" [{}]", d)).unwrap_or_default();
+    let prompt = format!("› Enter a value for {}{}: ", key, hint).blue().bold();
+
+    let input = tokio::select! {
+      res = read_line(prompt, key.contains("PASSWORD")) => res?,
+      _ = tokio::signal::ctrl_c() => {
+        println!("{}", "\n\nAdGuardian setup interrupted by user, exiting...".yellow());
+        std::process::exit(0);
+      }
+    };
+
+    let value = match input.trim() {
+      "" => default.unwrap_or_default(),
+      trimmed => trimmed,
+    };
+
+    if value.is_empty() {
+      println!("{}", "This value can't be empty, please try again".yellow());
+    } else if key == "ADGUARD_PORT" && value.parse::<u16>().is_err() {
+      println!(
+        "{}",
+        "Port must be a number between 1 and 65535, please try again".yellow()
+      );
+    } else {
+      return Ok(value.to_string());
+    }
+  }
+}
+
 /// Initiate the welcome script
 /// This function will:
 /// - Print the AdGuardian ASCII art
@@ -325,19 +386,7 @@ pub async fn welcome() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         format!("The {} environmental variable is not yet set", key.bold()).yellow()
       );
-      let prompt = format!("› Enter a value for {}: ", key).blue().bold();
-
-      let value = if key.contains("PASSWORD") {
-        // For the `PASSWORD` fields, prevent input showing on console
-        rpassword::prompt_password(prompt)?
-      } else {
-        print!("{}", prompt);
-        io::stdout().flush()?;
-        let mut value = String::new();
-        io::stdin().read_line(&mut value)?;
-        value
-      };
-      env::set_var(key, value.trim());
+      env::set_var(key, prompt_for(key).await?);
     }
   }
 
